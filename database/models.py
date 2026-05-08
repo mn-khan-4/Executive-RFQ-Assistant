@@ -1,10 +1,10 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ARRAY, Text, ForeignKey, Table
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, Table, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from config.database import Base
 
-# Association table for Many-to-Many relationship between Email and Tag
+# --- Association Tables ---
 email_tags = Table(
     'email_tags',
     Base.metadata,
@@ -12,7 +12,6 @@ email_tags = Table(
     Column('tag_id', Integer, ForeignKey('tags.id'), primary_key=True)
 )
 
-# Association table for Many-to-Many relationship between Thread and Tag
 thread_tags = Table(
     'thread_tags',
     Base.metadata,
@@ -20,31 +19,35 @@ thread_tags = Table(
     Column('tag_id', Integer, ForeignKey('tags.id'), primary_key=True)
 )
 
+# --- Models (all now multi-tenant with user_id) ---
+
 class Contact(Base):
-    """Formerly Client"""
     __tablename__ = 'contacts'
-    
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+
     contact_name = Column(String(255), nullable=False)
     email_domain = Column(String(100))
-    contact_emails = Column(ARRAY(Text))
+    contact_emails = Column(Text)  # change to ARRAY(Text) if Postgres ARRAY
     first_seen = Column(DateTime, default=datetime.utcnow)
     last_contact = Column(DateTime)
     total_interactions = Column(Integer, default=0)
     meta_data = Column(JSONB)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Relationships
+    user = relationship('User', back_populates='contacts')
     topics = relationship('Topic', back_populates='contact')
     threads = relationship('Thread', back_populates='contact')
 
+
 class Topic(Base):
-    """Formerly Project"""
     __tablename__ = 'topics'
-    
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     contact_id = Column(Integer, ForeignKey('contacts.id'), nullable=False)
+
     topic_name = Column(String(255))
     topic_reference = Column(String(100))
     thread_id = Column(String(50), unique=True)
@@ -53,37 +56,35 @@ class Topic(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     meta_data = Column(JSONB)
-    
+
     # Relationships
+    user = relationship('User', back_populates='topics')
     contact = relationship('Contact', back_populates='topics')
     threads = relationship('Thread', back_populates='topic')
 
+
 class Tag(Base):
-    """New Category/Tag Model"""
     __tablename__ = 'tags'
-    
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     name = Column(String(50), unique=True, nullable=False)
-    color = Column(String(20), default='#6366f1') # Default indigo
+    color = Column(String(20), default='#6366f1')
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
+    user = relationship('User', back_populates='tags')
     emails = relationship('Email', secondary=email_tags, back_populates='tags')
     threads = relationship('Thread', secondary=thread_tags, back_populates='tags')
 
+
 class Thread(Base):
-    """Formerly Tender"""
     __tablename__ = 'threads'
-    
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     thread_id = Column(String(50), unique=True, nullable=False)
     status = Column(String(50), nullable=False, default='PROCESSING')
-    
-    # Foreign Keys
     contact_id = Column(Integer, ForeignKey('contacts.id'))
     topic_id = Column(Integer, ForeignKey('topics.id'))
-    
-    # Details
     subject = Column(Text)
     contact_name = Column(String(255))
     topic_name = Column(String(255))
@@ -93,163 +94,161 @@ class Thread(Base):
     source = Column(String(50))
     source_email = Column(String(255))
     source_sender = Column(String(255))
-    meta_data = Column(JSONB)
-    
+
     # Relationships
+    user = relationship('User', back_populates='threads')
     contact = relationship('Contact', back_populates='threads')
     topic = relationship('Topic', back_populates='threads')
     tags = relationship('Tag', secondary=thread_tags, back_populates='threads')
 
+
 class Email(Base):
     __tablename__ = 'emails'
-    
     id = Column(Integer, primary_key=True)
-    thread_id = Column(String(50), index=True) # Link to Thread.thread_id
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    thread_id = Column(String(50), index=True)
     email_id = Column(String(255), unique=True)
-    message_id = Column(String(255), index=True) # RFC 2822 Message-ID
-    in_reply_to = Column(String(255), index=True) # Parent Message-ID
     subject = Column(Text)
     sender = Column(String(255))
-    recipients = Column(ARRAY(Text))
+    recipients = Column(Text)  # or ARRAY(Text)
     body = Column(Text)
-    received_at = Column(DateTime(timezone=True))
+    received_at = Column(DateTime)
     is_actionable = Column(Boolean, default=True)
     is_junk = Column(Boolean, default=False)
-    is_sent = Column(Boolean, default=False) # New: Track outgoing mail
+    is_sent = Column(Boolean, default=False)
     detection_confidence = Column(Float)
-    tags_suggested = Column(ARRAY(Text))
+    tags_suggested = Column(Text)  # or ARRAY(Text)
     processed = Column(Boolean, default=False)
-    meta_data = Column(JSONB) # New: Store meeting details, etc.
+    meta_data = Column(JSONB)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
+    user = relationship('User', back_populates='emails')
     tags = relationship('Tag', secondary=email_tags, back_populates='emails')
 
+
 class Attachment(Base):
-    """Formerly Document"""
     __tablename__ = 'attachments'
-    
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     thread_id = Column(String(50), index=True)
-    email_id = Column(String(255), index=True) # Link to specific email
-    category = Column(String(100)) # e.g. "01_Instructions", "02_Scope_of_Work"
+    category = Column(String(100))
     filename = Column(String(255), nullable=False)
     original_filename = Column(String(255))
     file_path = Column(Text, nullable=False)
     file_hash = Column(String(64), nullable=False)
     file_size_bytes = Column(Integer)
-    doc_type = Column(String(50)) # e.g. "Invoice", "Contract", "Image"
+    doc_type = Column(String(50))
     summary = Column(Text)
     is_correct = Column(Boolean, default=True)
     version = Column(Integer, default=1)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     source = Column(String(50))
 
-# Aliases for backward compatibility
+    # Relationships
+    user = relationship('User', back_populates='attachments')
+
+# Aliases
 Document = Attachment
 
 class DraftReply(Base):
-    """Formerly DraftEmail / RFIDraft"""
     __tablename__ = 'draft_replies'
-    
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     thread_id = Column(String(50), index=True)
-    draft_type = Column(String(50))  # 'REPLY', 'CLARIFICATION', 'ACKNOWLEDGMENT'
-    
-    # Email details
+    draft_type = Column(String(50))
     recipient = Column(String(255), nullable=False)
     subject = Column(Text, nullable=False)
     body = Column(Text, nullable=False)
-    
-    # Provider details (Outlook/Gmail)
-    email_provider = Column(String(20))  # 'outlook' or 'gmail'
-    provider_draft_id = Column(String(255))  # Draft ID from email provider
-    
-    # Status and metadata
-    status = Column(String(50), default='DRAFT')  # 'DRAFT', 'SENT', 'DELETED'
+    email_provider = Column(String(20))
+    provider_draft_id = Column(String(255))
+    status = Column(String(50), default='DRAFT')
     created_by = Column(String(50), default='GENERAL_EMAIL_ASSISTANT')
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     sent_at = Column(DateTime)
-    
-    # Link to original email
     in_reply_to_email_id = Column(String(255))
     meta_data = Column(JSONB)
-    scheduled_at = Column(DateTime) # For future "Send Later" feature
+    scheduled_at = Column(DateTime)
+
+    # Relationships
+    user = relationship('User', back_populates='draft_replies')
+
+# Aliases
+DraftEmail = DraftReply
+RFIDraft = DraftReply
 
 class FollowupTask(Base):
-    """New: Track threads that need following up"""
     __tablename__ = 'followup_tasks'
-    
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     thread_id = Column(String(50), ForeignKey('threads.thread_id'))
-    original_email_id = Column(String(255)) # ID of the sent email we are following up on
+    original_email_id = Column(String(255))
     recipient = Column(String(255))
     suggested_body = Column(Text)
-    status = Column(String(50), default='PENDING') # PENDING, ACTIONED, IGNORED
+    status = Column(String(50), default='PENDING')
     due_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    # Relationships
+    user = relationship('User', back_populates='followup_tasks')
+
 class User(Base):
     __tablename__ = 'users'
-    
     id = Column(Integer, primary_key=True)
     email = Column(String(255), unique=True, index=True, nullable=False)
     full_name = Column(String(255))
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(50), default='user') # 'superadmin', 'admin', 'user'
+    role = Column(String(50), default='user')  # 'superadmin', 'admin', 'user'
     is_active = Column(Boolean, default=True)
     preferences = Column(JSONB, default=lambda: {})
-    
-    # Intelligence & Style Settings
-    brand_voice = Column(Text) # Raw samples provided by user
-    custom_instructions = Column(Text) # Explicit user preferences
-    writing_style_guide = Column(Text) # AI analyzed communication style rules
-    last_style_sync = Column(DateTime) # Last time background sync ran
-    
+    brand_voice = Column(Text)
+    custom_instructions = Column(Text)
+    writing_style_guide = Column(Text)
+    last_style_sync = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login = Column(DateTime)
-    
+
     # Relationships
+    contacts = relationship('Contact', back_populates='user')
+    topics = relationship('Topic', back_populates='user')
+    tags = relationship('Tag', back_populates='user')
+    threads = relationship('Thread', back_populates='user')
+    emails = relationship('Email', back_populates='user')
+    attachments = relationship('Attachment', back_populates='user')
+    draft_replies = relationship('DraftReply', back_populates='user')
+    followup_tasks = relationship('FollowupTask', back_populates='user')
     audit_logs = relationship('AuditLog', back_populates='user')
 
 class AuditLog(Base):
     __tablename__ = 'audit_log'
-    
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     thread_id = Column(String(50))
-    agent = Column(String(50), default='RFI_AGENT') 
+    agent = Column(String(50), default='RFI_AGENT')
     action = Column(String(100), nullable=False)
     details = Column(JSONB)
     ip_address = Column(String(50))
     timestamp = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     user = relationship('User', back_populates='audit_logs')
 
 class AssistantConversation(Base):
     __tablename__ = 'assistant_conversations'
-    
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     title = Column(String(255), default='New Conversation')
-    mode = Column(String(20), default='enterprise') # 'enterprise' or 'general'
+    mode = Column(String(20), default='enterprise')
     created_at = Column(DateTime, default=datetime.utcnow)
     last_message_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class AssistantChat(Base):
     __tablename__ = 'assistant_chat'
-    
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     conversation_id = Column(Integer, ForeignKey('assistant_conversations.id'), nullable=True)
     role = Column(String(20), nullable=False)
     content = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
-
-# Aliases for backward compatibility with RFQ Agent code base
-Tender = Thread
-DraftEmail = DraftReply
-Client = Contact
-Project = Topic
-RFIDraft = DraftReply
