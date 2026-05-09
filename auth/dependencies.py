@@ -1,3 +1,11 @@
+def get_current_superadmin(current_user: User = Depends(get_current_user)):
+    """Dependency to enforce superadmin-only role."""
+    if current_user.role != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superadmin privileges required"
+        )
+    return current_user
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 from typing import Optional

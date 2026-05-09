@@ -4,7 +4,7 @@ from sqlalchemy import func
 from typing import List, Optional
 from config.database import SessionLocal
 from database.models import User, AuditLog, Thread, Email, Attachment
-from auth.dependencies import get_current_admin
+from auth.dependencies import get_current_admin, get_current_superadmin
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -86,11 +86,8 @@ async def get_admin_stats(current_admin: User = Depends(get_current_admin), db: 
     }
 
 @router.get("/users")
-async def list_users(current_admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
+async def list_users(current_superadmin: User = Depends(get_current_superadmin), db: Session = Depends(get_db)):
     """List all registered users. SuperAdmin Only."""
-    if current_admin.role != "superadmin":
-        raise HTTPException(status_code=403, detail="SuperAdmin privileges required")
-    
     users = db.query(User).order_by(User.id.asc()).all()
     return [
         {

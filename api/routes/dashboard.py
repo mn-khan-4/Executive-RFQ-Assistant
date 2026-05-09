@@ -31,32 +31,32 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user), db
         return {"success": True, "data": STATS_CACHE["data"]}
 
     try:
-        active_threads = db.query(Thread).count()
-        total_emails = db.query(Email).count()
-        total_contacts = db.query(Contact).count()
-        pending_replies = db.query(DraftReply).count()
-        unprocessed_emails = db.query(Email).filter(Email.processed == False).count()
-        
+        active_threads = db.query(Thread).filter(Thread.user_id == current_user.id).count()
+        total_emails = db.query(Email).filter(Email.user_id == current_user.id).count()
+        total_contacts = db.query(Contact).filter(Contact.user_id == current_user.id).count()
+        pending_replies = db.query(DraftReply).filter(DraftReply.user_id == current_user.id).count()
+        unprocessed_emails = db.query(Email).filter(Email.user_id == current_user.id, Email.processed == False).count()
+
         # New Construction Intelligence Metrics
-        incomplete_tenders = db.query(Thread).filter(Thread.status == 'AWAITING_DOCS').count()
-        urgent_tasks = db.query(Thread).filter(Thread.status == 'URGENT').count()
-        
+        incomplete_tenders = db.query(Thread).filter(Thread.user_id == current_user.id, Thread.status == 'AWAITING_DOCS').count()
+        urgent_tasks = db.query(Thread).filter(Thread.user_id == current_user.id, Thread.status == 'URGENT').count()
+
         # Efficient missing categories check
-        awaiting = db.query(Thread).filter(Thread.status == 'AWAITING_DOCS').all()
+        awaiting = db.query(Thread).filter(Thread.user_id == current_user.id, Thread.status == 'AWAITING_DOCS').all()
         missing_stats = {}
         mandatory = ['01_Instructions', '02_Scope_of_Work', '03_Drawings', '04_Specifications', '05_BOQ']
-        
+
         for t in awaiting:
             # Optimize: Get all attachment categories for this thread once
-            existing_cats = db.query(Attachment.category).filter(Attachment.thread_id == t.thread_id).all()
+            existing_cats = db.query(Attachment.category).filter(Attachment.thread_id == t.thread_id, Attachment.user_id == current_user.id).all()
             existing_cats_set = {c[0] for c in existing_cats if c[0]}
             for m in mandatory:
                 if m not in existing_cats_set:
                     missing_stats[m] = missing_stats.get(m, 0) + 1
-        
+
         import re
         top_missing = sorted(missing_stats.items(), key=lambda x: x[1], reverse=True)[:5]
-        top_missing_data = [{"category": re.sub(r'^\d+_', '', k).replace('_', ' '), "count": v} for k, v in top_missing]
+        top_missing_data = [{"category": re.sub(r'^\\d+_','', k).replace('_', ' '), "count": v} for k, v in top_missing]
 
         stats_data = {
             "activeTenders": active_threads,
@@ -128,10 +128,10 @@ async def get_system_status(current_user: User = Depends(get_current_user), db: 
 async def get_agent_status(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Return the current processing status of the agent with live logs"""
     global sync_progress
-    
+
     # Fetch latest logs from AuditLog for the active session
-    latest_logs = db.query(AuditLog).order_by(desc(AuditLog.timestamp)).limit(5).all()
-    
+    latest_logs = db.query(AuditLog).filter(AuditLog.user_id == current_user.id).order_by(desc(AuditLog.timestamp)).limit(5).all()
+
     logs_data = []
     for log in latest_logs:
         logs_data.append({
@@ -139,7 +139,7 @@ async def get_agent_status(current_user: User = Depends(get_current_user), db: S
             "action": log.action,
             "details": log.details or {}
         })
-    
+
     return {
         **sync_progress,
         "latest_logs": logs_data
@@ -152,20 +152,21 @@ async def get_session_summary(from_time: str, to_time: str, current_user: User =
         # Parse ISO strings
         dt_from = datetime.fromisoformat(from_time.replace('Z', '+00:00'))
         dt_to = datetime.fromisoformat(to_time.replace('Z', '+00:00'))
-        
-        # Query emails processed in this range
+
+        # Query emails processed in this range for this user
         emails = db.query(Email).filter(
+            Email.user_id == current_user.id,
             Email.received_at >= dt_from,
             Email.received_at <= dt_to,
             Email.processed == True
         ).all()
-        
+
         summary_data = []
         for e in emails:
             # Get attachment count
-            doc_count = db.query(Thread).filter(Thread.thread_id == e.thread_id).first()
-            attachments_count = db.query(Attachment).filter(Attachment.thread_id == e.thread_id).count()
-            
+            doc_count = db.query(Thread).filter(Thread.thread_id == e.thread_id, Thread.user_id == current_user.id).first()
+            attachments_count = db.query(Attachment).filter(Attachment.thread_id == e.thread_id, Attachment.user_id == current_user.id).count()
+
             summary_data.append({
                 "email_id": e.email_id,
                 "subject": e.subject,
@@ -174,7 +175,7 @@ async def get_session_summary(from_time: str, to_time: str, current_user: User =
                 "thread_id": e.thread_id,
                 "doc_count": attachments_count
             })
-            
+
         return {
             "success": True,
             "count": len(summary_data),

@@ -252,3 +252,29 @@ class AssistantChat(Base):
     role = Column(String(20), nullable=False)
     content = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+# --- MailAccount model for per-user OAuth tokens ---
+class MailAccount(Base):
+    __tablename__ = 'mail_accounts'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    provider = Column(String(50), nullable=False)  # 'gmail', 'outlook', etc.
+    email_address = Column(String(255), nullable=False)
+    token = Column(Text, nullable=False)  # Store encrypted/serialized token
+    refresh_token = Column(Text)
+    token_expiry = Column(DateTime)
+    meta_data = Column(JSONB)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        # Unique per user, provider, email
+        UniqueConstraint('user_id', 'provider', 'email_address', name='uq_user_provider_email'),
+    )
+
+    user = relationship('User', back_populates='mail_accounts')
+
+
+# Add relationship to User
+User.mail_accounts = relationship('MailAccount', back_populates='user')

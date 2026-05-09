@@ -6,7 +6,7 @@ import os
 import msal
 from pathlib import Path
 from config.database import get_db
-from database.models import User, Email
+from database.models import User, Email, MailAccount
 from auth.dependencies import get_current_user
 from api.tasks import sync_user_writing_style
 from config.oauth_config import CLIENT_ID, CLIENT_SECRET, TENANT_ID, SCOPES, TOKEN_FILE, REDIRECT_URI
@@ -39,23 +39,42 @@ async def outlook_oauth_login():
 @router.get("/api/oauth/callback")
 @router.get("/api/outlook/oauth/callback")
 @router.get("/oauth/callback") # Alias for console compatibility
-async def outlook_oauth_callback(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def outlook_oauth_callback(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     code = request.query_params.get('code')
     if not code:
         return HTMLResponse("<h1>Error: No code received</h1>", status_code=400)
-    
+
     msal_app = get_msal_app()
     result = msal_app.acquire_token_by_authorization_code(
         code, scopes=list(SCOPES), redirect_uri=REDIRECT_URI
     )
-    
+
     if "access_token" in result:
-        with open(TOKEN_FILE, 'w') as f:
-            json.dump(result, f, indent=2)
-        
-        user = db.query(User).first()
-        if user:
-            background_tasks.add_task(sync_user_writing_style, user.id, 'outlook')
+        # Save token to mail_accounts table
+        email_address = result.get("id_token_claims", {}).get("preferred_username") or result.get("id_token_claims", {}).get("email")
+        if not email_address:
+            email_address = result.get("userPrincipalName") or "unknown@outlook"
+        mail_account = db.query(MailAccount).filter_by(
+            user_id=current_user.id, provider="outlook", email_address=email_address
+        ).first()
+        if not mail_account:
+            mail_account = MailAccount(
+                user_id=current_user.id,
+                provider="outlook",
+                email_address=email_address,
+                token=result["access_token"],
+                refresh_token=result.get("refresh_token"),
+                token_expiry=None,
+                meta_data=result
+            )
+            db.add(mail_account)
+        else:
+            mail_account.token = result["access_token"]
+            mail_account.refresh_token = result.get("refresh_token")
+            mail_account.meta_data = result
+        db.commit()
+
+        background_tasks.add_task(sync_user_writing_style, current_user.id, 'outlook')
 
         return HTMLResponse(content=f"""
             <html>
@@ -117,20 +136,39 @@ async def gmail_oauth_login():
 
 @router.get("/api/gmail/oauth/callback")
 @router.get("/gmail/oauth/callback") # Alias for console compatibility
-async def gmail_oauth_callback(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def gmail_oauth_callback(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     code = request.query_params.get('code')
     flow = get_gmail_flow()
     flow.fetch_token(code=code)
-    
-    # Save credentials
+
+    # Save credentials to mail_accounts table
     creds = flow.credentials
-    with open('.gmail_oauth_token.json', 'w') as f:
-        f.write(creds.to_json())
-    
-    user = db.query(User).first()
-    if user:
-        background_tasks.add_task(sync_user_writing_style, user.id, 'gmail')
-        
+    email_address = creds.id_token.get("email") if creds.id_token else None
+    if not email_address:
+        email_address = creds._client_id or "unknown@gmail"
+    mail_account = db.query(MailAccount).filter_by(
+        user_id=current_user.id, provider="gmail", email_address=email_address
+    ).first()
+    if not mail_account:
+        mail_account = MailAccount(
+            user_id=current_user.id,
+            provider="gmail",
+            email_address=email_address,
+            token=creds.token,
+            refresh_token=getattr(creds, "refresh_token", None),
+            token_expiry=getattr(creds, "expiry", None),
+            meta_data=json.loads(creds.to_json())
+        )
+        db.add(mail_account)
+    else:
+        mail_account.token = creds.token
+        mail_account.refresh_token = getattr(creds, "refresh_token", None)
+        mail_account.token_expiry = getattr(creds, "expiry", None)
+        mail_account.meta_data = json.loads(creds.to_json())
+    db.commit()
+
+    background_tasks.add_task(sync_user_writing_style, current_user.id, 'gmail')
+
     return HTMLResponse(content=f"""
         <html>
             <head>
@@ -167,41 +205,42 @@ async def gmail_oauth_callback(request: Request, background_tasks: BackgroundTas
 
 @router.get("/api/emails")
 async def get_emails(thread_id: str = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    query = db.query(Email)
+    query = db.query(Email).filter(Email.user_id == current_user.id)
     # Hide training/historical emails by default unless specifically requested
     if thread_id:
         query = query.filter(Email.thread_id == thread_id)
     else:
         query = query.filter(Email.thread_id != "SYNC_HISTORICAL")
-        
     emails = query.order_by(Email.received_at.desc()).all()
     return {"success": True, "data": emails}
 
 @router.get("/api/emails/{id}")
 async def get_single_email(id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    email = db.query(Email).filter(Email.id == id).first()
+    email = db.query(Email).filter(Email.id == id, Email.user_id == current_user.id).first()
     if not email:
         raise HTTPException(status_code=404, detail="Email not found")
     return {"success": True, "data": email}
 
 @router.get("/api/oauth/status")
 @router.get("/api/gmail/oauth/status")
-async def get_oauth_status(request: Request):
-    outlook_connected = Path(".outlook_oauth_token.json").exists()
-    gmail_connected = Path(".gmail_oauth_token.json").exists()
-    
-    # If the request comes specifically from /api/gmail/oauth/status, return gmail specific status
+async def get_oauth_status(request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Query mail_accounts for this user
+    gmail_account = db.query(MailAccount).filter_by(user_id=current_user.id, provider="gmail").first()
+    outlook_account = db.query(MailAccount).filter_by(user_id=current_user.id, provider="outlook").first()
+
+    gmail_connected = gmail_account is not None and gmail_account.token is not None
+    outlook_connected = outlook_account is not None and outlook_account.token is not None
+
     if "gmail" in request.url.path:
         return {
             "success": True,
             "status": "connected" if gmail_connected else "disconnected",
             "authenticated": gmail_connected
         }
-    
-    # Default response for general /api/oauth/status (Outlook uses this too)
+
     return {
         "success": True,
-        "status": "connected" if outlook_connected else "disconnected", # UI looks at .status
+        "status": "connected" if outlook_connected else "disconnected",
         "outlook": "connected" if outlook_connected else "disconnected",
         "gmail": "connected" if gmail_connected else "disconnected",
         "authenticated": gmail_connected or outlook_connected
