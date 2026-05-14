@@ -13,12 +13,16 @@ from typing import Dict, Optional, List
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from sqlalchemy.orm import Session
+from database.models import MailAccount
 
 
 class DraftManager:
     """Manage draft email creation in Gmail and Outlook"""
     
-    def __init__(self):
+    def __init__(self, user_id: int = None, db: Session = None):
+        self.user_id = user_id
+        self.db = db
         self.gmail_token_file = Path('.gmail_oauth_token.json')
         self.outlook_token_file = Path('.outlook_oauth_token.json')
     
@@ -39,12 +43,23 @@ class DraftManager:
         
         for attempt in range(max_retries):
             try:
-                # Load Gmail token
-                if not self.gmail_token_file.exists():
-                    raise Exception("Gmail token not found. Please authenticate first.")
+                token_data = None
+                if self.user_id and self.db:
+                    mail_account = self.db.query(MailAccount).filter_by(
+                        user_id=self.user_id, provider="gmail"
+                    ).first()
+                    if mail_account:
+                        token_data = mail_account.meta_data
+                        if isinstance(token_data, str):
+                            token_data = json.loads(token_data)
+
+                # Fallback to file
+                if not token_data and self.gmail_token_file.exists():
+                    with open(self.gmail_token_file) as f:
+                        token_data = json.load(f)
                 
-                with open(self.gmail_token_file) as f:
-                    token_data = json.load(f)
+                if not token_data:
+                    raise Exception("Gmail token not found. Please authenticate first.")
                 
                 # Create credentials
                 creds = Credentials(
@@ -114,12 +129,26 @@ class DraftManager:
         
         for attempt in range(max_retries):
             try:
-                # Load Outlook token
-                if not self.outlook_token_file.exists():
-                    raise Exception("Outlook token not found. Please authenticate first.")
+                token_data = None
+                if self.user_id and self.db:
+                    mail_account = self.db.query(MailAccount).filter_by(
+                        user_id=self.user_id, provider="outlook"
+                    ).first()
+                    if mail_account:
+                        import json
+                        token_data = {
+                            "access_token": mail_account.token,
+                            "refresh_token": mail_account.refresh_token,
+                            "meta_data": mail_account.meta_data
+                        }
+
+                # Fallback to file
+                if not token_data and self.outlook_token_file.exists():
+                    with open(self.outlook_token_file) as f:
+                        token_data = json.load(f)
                 
-                with open(self.outlook_token_file) as f:
-                    token_data = json.load(f)
+                if not token_data:
+                    raise Exception("Outlook token not found. Please authenticate first.")
                 
                 headers = {
                     'Authorization': f"Bearer {token_data['access_token']}",

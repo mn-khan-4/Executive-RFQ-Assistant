@@ -107,12 +107,14 @@ async def get_system_status(current_user: User = Depends(get_current_user), db: 
     except: pass
     
     try:
-        outlook = OutlookGraphFetcher()
+        outlook = OutlookGraphFetcher(user_id=current_user.id, db=db)
         if outlook.connect(): status["outlook"] = "connected"
-        elif Path(".outlook_oauth_token.json").exists(): status["outlook"] = "unauthorized"
+        elif db.query(MailAccount).filter_by(user_id=current_user.id, provider="outlook").first():
+             status["outlook"] = "unauthorized"
     except: pass
         
-    if Path(".gmail_oauth_token.json").exists(): status["gmail"] = True
+    if db.query(MailAccount).filter_by(user_id=current_user.id, provider="gmail").first():
+        status["gmail"] = True
         
     try:
         llm = PixtralClient()
@@ -210,8 +212,8 @@ async def run_sync_intelligence(user_id: int):
     db = SessionLocal()
     try:
         sync_progress["status"] = "Connecting to email providers..."
-        fetcher_gmail = EmailFetcher(provider='gmail')
-        fetcher_outlook = EmailFetcher(provider='outlook')
+        fetcher_gmail = EmailFetcher(provider='gmail', user_id=user_id, db=db)
+        fetcher_outlook = EmailFetcher(provider='outlook', user_id=user_id, db=db)
         
         all_emails = []
         
@@ -241,7 +243,7 @@ async def run_sync_intelligence(user_id: int):
             
             try:
                 # Process the email (Multi-agent workflow)
-                process_incoming_email(email_data)
+                process_incoming_email(email_data, user_id=user_id)
                 
                 # Mark as read/processed in provider
                 if email_data['provider'] == 'gmail':
@@ -301,29 +303,28 @@ async def get_followups(current_user: User = Depends(get_current_user), db: Sess
     followups = [{"id": t.id, "subject": t.subject, "contact": t.contact_name} for t in threads]
     return {"success": True, "data": followups}
 
-# Simple in-memory cache for calendar events to improve performance
-CALENDAR_CACHE = {
-    "data": [],
-    "last_updated": 0,
-    "expiry": 300 # 5 minutes
-}
+# Simple global cache (Should be Redis in production)
+# Structure: { user_id: {"data": [...], "last_updated": timestamp} }
+CALENDAR_CACHE = {}
+CALENDAR_EXPIRY = 300 # 5 minutes
 
 @router.get("/api/calendar/events")
-async def get_calendar_events(days: int = 30, current_user: User = Depends(get_current_user)):
+async def get_calendar_events(days: int = 30, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Fetch events from both Google and Outlook with simple caching"""
-    global CALENDAR_CACHE
-    
     now = time.time()
+    user_cache = CALENDAR_CACHE.get(current_user.id, {"data": [], "last_updated": 0})
+    
     # Return cached data if not expired and not forcing refresh
-    if CALENDAR_CACHE["data"] and (now - CALENDAR_CACHE["last_updated"] < CALENDAR_CACHE["expiry"]):
-        return {"success": True, "data": CALENDAR_CACHE["data"], "cached": True}
+    if user_cache["data"] and (now - user_cache["last_updated"] < CALENDAR_EXPIRY):
+        return {"success": True, "data": user_cache["data"], "cached": True}
         
     all_events = []
     
     # 1. Fetch from Outlook
     try:
-        if Path(".outlook_oauth_token.json").exists():
-            outlook = OutlookGraphFetcher()
+        mail_account = db.query(MailAccount).filter_by(user_id=current_user.id, provider="outlook").first()
+        if mail_account:
+            outlook = OutlookGraphFetcher(user_id=current_user.id, db=db)
             if outlook.connect():
                 events = outlook.fetch_calendar_events(days=days)
                 all_events.extend(events)
@@ -332,8 +333,9 @@ async def get_calendar_events(days: int = 30, current_user: User = Depends(get_c
         
     # 2. Fetch from Gmail/Google
     try:
-        if Path(".gmail_oauth_token.json").exists():
-            gmail = GmailAPIFetcher()
+        mail_account = db.query(MailAccount).filter_by(user_id=current_user.id, provider="gmail").first()
+        if mail_account:
+            gmail = GmailAPIFetcher(user_id=current_user.id, db=db)
             if gmail.connect():
                 events = gmail.fetch_calendar_events(days=days)
                 all_events.extend(events)
@@ -344,8 +346,10 @@ async def get_calendar_events(days: int = 30, current_user: User = Depends(get_c
     all_events.sort(key=lambda x: x['start'])
     
     # Update cache
-    CALENDAR_CACHE["data"] = all_events
-    CALENDAR_CACHE["last_updated"] = now
+    CALENDAR_CACHE[current_user.id] = {
+        "data": all_events,
+        "last_updated": now
+    }
     
     return {"success": True, "data": all_events}
 
@@ -359,12 +363,14 @@ async def get_session_summary(from_time: str, to_time: str, current_user: User =
         
         # Count emails processed in this window
         processed_count = db.query(Email).filter(
+            Email.user_id == current_user.id,
             Email.received_at >= dt_from,
             Email.received_at <= dt_to
         ).count()
         
         # Count threads created/updated
         threads_updated = db.query(Thread).filter(
+            Thread.user_id == current_user.id,
             Thread.updated_at >= dt_from,
             Thread.updated_at <= dt_to
         ).count()
@@ -372,6 +378,7 @@ async def get_session_summary(from_time: str, to_time: str, current_user: User =
         # Identify top contacts in this window
         # (This is simplified logic)
         top_threads = db.query(Thread).filter(
+            Thread.user_id == current_user.id,
             Thread.updated_at >= dt_from,
             Thread.updated_at <= dt_to
         ).limit(5).all()
@@ -396,7 +403,7 @@ async def get_session_summary(from_time: str, to_time: str, current_user: User =
 
 
 @router.post("/api/calendar/events")
-async def create_calendar_event(data: dict, current_user: User = Depends(get_current_user)):
+async def create_calendar_event(data: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Create an event in either Google or Outlook"""
     provider = data.get('provider', 'google')
     title = data.get('title', 'RFI Meeting')
@@ -410,12 +417,12 @@ async def create_calendar_event(data: dict, current_user: User = Depends(get_cur
         
     try:
         if provider == 'outlook':
-            fetcher = OutlookGraphFetcher()
+            fetcher = OutlookGraphFetcher(user_id=current_user.id, db=db)
             if not fetcher.connect(): return {"success": False, "error": "Outlook not connected"}
             result = fetcher.create_calendar_event(title, start, end, attendees, description)
             return result
         else:
-            fetcher = GmailAPIFetcher()
+            fetcher = GmailAPIFetcher(user_id=current_user.id, db=db)
             if not fetcher.connect(): return {"success": False, "error": "Gmail not connected"}
             result = fetcher.create_calendar_event(title, start, end, attendees, description)
             return result

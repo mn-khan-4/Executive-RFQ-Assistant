@@ -58,16 +58,17 @@ async def send_draft(draft_id: int, db: Session = Depends(get_db), current_user:
     error = None
     try:
         if provider == 'outlook':
-            fetcher = OutlookGraphFetcher()
+            fetcher = OutlookGraphFetcher(user_id=current_user.id, db=db)
             if fetcher.connect():
                 result = fetcher.send_draft(draft.provider_draft_id)
                 success = result.get('success', False)
                 error = result.get('error')
         elif provider == 'gmail':
-            fetcher = GmailAPIFetcher()
-            result = fetcher.send_draft(draft.provider_draft_id)
-            success = result.get('success', False)
-            error = result.get('error')
+            fetcher = GmailAPIFetcher(user_id=current_user.id, db=db)
+            if fetcher.connect(): # Added connect() check for consistency
+                result = fetcher.send_draft(draft.provider_draft_id)
+                success = result.get('success', False)
+                error = result.get('error')
         if success:
             draft.status = 'SENT'
             draft.sent_at = datetime.utcnow()

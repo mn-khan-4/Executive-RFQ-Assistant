@@ -8,6 +8,10 @@ import base64
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
+
+# Database imports
+from database.models import MailAccount
+from sqlalchemy.orm import Session
 # Defer heavy Google imports to inside methods to prevent startup hangs
 # but consolidate common ones used repeatedly
 from google.oauth2.credentials import Credentials
@@ -28,22 +32,47 @@ import mimetypes
 class GmailAPIFetcher:
     """Fetch Gmail emails using Gmail API"""
     
-    def __init__(self):
+    def __init__(self, user_id: int = None, db: Session = None):
+        self.user_id = user_id
+        self.db = db
         self.token_file = Path('.gmail_oauth_token.json')
         self.credentials = None
         self.service = None
     
     def _load_credentials(self) -> 'Credentials':
-        """Load OAuth2 credentials from file"""
-        if not self.token_file.exists():
+        """Load OAuth2 credentials from database or file"""
+        token_data = None
+        mail_account = None
+
+        if self.user_id and self.db:
+            # Load from database
+            mail_account = self.db.query(MailAccount).filter_by(
+                user_id=self.user_id, provider="gmail"
+            ).first()
+            if mail_account:
+                # Gmail tokens are often stored as JSON in the database or serialized
+                # Based on api/routes/emails.py, it's saved as creds.token etc.
+                # but meta_data contains the full JSON
+                token_data = mail_account.meta_data
+                if isinstance(token_data, str):
+                    token_data = json.loads(token_data)
+        
+        # Fallback to file for legacy
+        if not token_data and self.token_file.exists():
+            try:
+                with open(self.token_file, 'r') as f:
+                    token_data = json.load(f)
+            except Exception as e:
+                print(f"Error loading legacy Gmail token file: {e}")
+
+        if not token_data:
             raise Exception(
                 "No Gmail OAuth token found! "
-                "Please authenticate first via: http://localhost:5001/gmail/oauth/login"
+                "Please authenticate first via the Settings page."
             )
         
         try:
-            with open(self.token_file, 'r') as f:
-                token_data = json.load(f)
+            # We already loaded token_data above
             
             from google.oauth2.credentials import Credentials
             from google.auth.transport.requests import Request as GoogleRequest
@@ -63,8 +92,21 @@ class GmailAPIFetcher:
                 
                 # Save refreshed token
                 token_data['token'] = credentials.token
-                with open(self.token_file, 'w') as f:
-                    json.dump(token_data, f, indent=2)
+                
+                # Save back to DB if we have it
+                if mail_account:
+                    mail_account.token = credentials.token
+                    mail_account.refresh_token = credentials.refresh_token
+                    mail_account.token_expiry = credentials.expiry
+                    # Update meta_data with new token
+                    if isinstance(mail_account.meta_data, dict):
+                        mail_account.meta_data['token'] = credentials.token
+                    self.db.commit()
+
+                # Also update legacy file if it exists
+                if self.token_file.exists():
+                    with open(self.token_file, 'w') as f:
+                        json.dump(token_data, f, indent=2)
             
             return credentials
         

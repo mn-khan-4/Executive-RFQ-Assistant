@@ -20,7 +20,8 @@ class ClientMatcher:
     def find_or_create_client(self, 
                              email_sender: str, 
                              email_body: str,
-                             session: Optional[Session] = None) -> Client:
+                             session: Optional[Session] = None,
+                             user_id: int = None) -> Client:
         """
         Find existing client or create new one
         
@@ -38,7 +39,7 @@ class ClientMatcher:
         
         try:
             # Try to match by email domain first
-            client = self.match_by_email_domain(email_sender, session)
+            client = self.match_by_email_domain(email_sender, session, user_id=user_id)
             
             if client:
                 # Update last contact
@@ -58,11 +59,12 @@ class ClientMatcher:
             
             new_client = Client(
                 contact_name=client_name,
+                user_id=user_id,
                 email_domain=email_domain,
                 contact_emails=[email_sender],
                 first_seen=datetime.utcnow(),
                 last_contact=datetime.utcnow(),
-                total_interactions=0,
+                total_interactions=1,
                 meta_data={}
             )
             
@@ -123,7 +125,8 @@ If you cannot determine the company name, use the email domain as the name.
     
     def match_by_email_domain(self, 
                              email: str, 
-                             session: Session) -> Optional[Client]:
+                             session: Session,
+                             user_id: int = None) -> Optional[Client]:
         """
         Match client by email domain, but skip for public providers (Gmail, etc.)
         """
@@ -139,9 +142,10 @@ If you cannot determine the company name, use the email domain as the name.
         # If it's a public domain, DO NOT match by domain. Only match by exact email.
         if domain not in PUBLIC_DOMAINS:
             # Try exact domain match first
-            client = session.query(Client).filter(
-                Client.email_domain == domain
-            ).first()
+            query = session.query(Client).filter(Client.email_domain == domain)
+            if user_id:
+                query = query.filter(Client.user_id == user_id)
+            client = query.first()
             
             if client:
                 return client
@@ -151,9 +155,10 @@ If you cannot determine the company name, use the email domain as the name.
         # Try matching by contact emails using any()
         # PostgreSQL ARRAY syntax: WHERE email = ANY(contact_emails)
         try:
-            client = session.query(Client).filter(
-                Client.contact_emails.any(email)
-            ).first()
+            query = session.query(Client).filter(Client.contact_emails.any(email))
+            if user_id:
+                query = query.filter(Client.user_id == user_id)
+            client = query.first()
         except:
             # Fallback if any() doesn't work either
             pass

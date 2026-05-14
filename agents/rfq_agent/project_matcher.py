@@ -19,7 +19,8 @@ class ProjectMatcher:
     def find_matching_project(self,
                               client_id: int,
                               project_data: Dict,
-                              session: Optional[Session] = None) -> Optional[Project]:
+                              session: Optional[Session] = None,
+                              user_id: int = None) -> Optional[Project]:
         """
         Find matching project using a multi-layer strategy:
         Layer 1: Metadata Matching (100% Confidence) - Threading headers
@@ -36,14 +37,20 @@ class ProjectMatcher:
             in_reply_to = project_data.get('in_reply_to')
             if in_reply_to:
                 from database.models import Email
-                parent_email = session.query(Email).filter(Email.message_id == in_reply_to).first()
+                query = session.query(Email).filter(Email.message_id == in_reply_to)
+                if user_id:
+                    query = query.filter(Email.user_id == user_id)
+                parent_email = query.first()
                 if parent_email:
                     # Found the parent! 
                     # CRITICAL: Check if the user is HIJACKING an old thread for a NEW project
                     is_new_intent = self._detect_intent_shift(project_data, parent_email.subject)
                     
                     if not is_new_intent:
-                        project = session.query(Project).filter(Project.thread_id == parent_email.thread_id).first()
+                        query = session.query(Project).filter(Project.thread_id == parent_email.thread_id)
+                        if user_id:
+                            query = query.filter(Project.user_id == user_id)
+                        project = query.first()
                         if project:
                             print(f"DONE: Matched project by Metadata Threading: {project.topic_name} (100% Confident)")
                             return project
@@ -55,12 +62,18 @@ class ProjectMatcher:
             if conversation_id:
                 from database.models import Email
                 # Using PostgreSQL JSONB operators
-                sibling_email = session.query(Email).filter(Email.meta_data.op('->>')('conversation_id') == conversation_id).first()
+                query = session.query(Email).filter(Email.meta_data.op('->>')('conversation_id') == conversation_id)
+                if user_id:
+                    query = query.filter(Email.user_id == user_id)
+                sibling_email = query.first()
                 if sibling_email:
                     # Same logic: check for hijacking
                     is_new_intent = self._detect_intent_shift(project_data, sibling_email.subject)
                     if not is_new_intent:
-                        project = session.query(Project).filter(Project.thread_id == sibling_email.thread_id).first()
+                        query = session.query(Project).filter(Project.thread_id == sibling_email.thread_id)
+                        if user_id:
+                            query = query.filter(Project.user_id == user_id)
+                        project = query.first()
                         if project:
                             print(f"DONE: Matched project by Conversation ID: {project.topic_name} (100% Confident)")
                             return project
@@ -70,10 +83,13 @@ class ProjectMatcher:
             project_ref = self.extract_project_reference(project_data)
             
             # Get all projects for this client
-            projects = session.query(Project).filter(
+            query = session.query(Project).filter(
                 Project.contact_id == client_id,
                 Project.status == 'ACTIVE'
-            ).all()
+            )
+            if user_id:
+                query = query.filter(Project.user_id == user_id)
+            projects = query.all()
             
             if not projects:
                 return None
@@ -198,7 +214,8 @@ Return JSON:
                           tender_id: str,
                           project_name: str,
                           project_reference: str = "",
-                          session: Optional[Session] = None) -> Project:
+                          session: Optional[Session] = None,
+                          user_id: int = None) -> Project:
         """
         Create new project for a client
         """
@@ -217,6 +234,7 @@ Return JSON:
             from database.models import Topic as Project
             project = Project(
                 contact_id=client_id,
+                user_id=user_id,
                 topic_name=project_name,
                 topic_reference=project_reference,
                 thread_id=tender_id,

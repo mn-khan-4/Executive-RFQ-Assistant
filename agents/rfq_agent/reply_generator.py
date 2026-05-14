@@ -3,11 +3,15 @@ from config.prompts import GENERAL_EMAIL_ASSISTANT_PROMPT, PROFESSIONAL_REPLY_PR
 from typing import Dict, List
 import os
 import json
+from sqlalchemy.orm import Session
+from database.models import MailAccount
 
 class ReplyGenerator:
     """Generate high-quality business email drafts and category suggestions"""
     
-    def __init__(self):
+    def __init__(self, user_id: int = None, db: Session = None):
+        self.user_id = user_id
+        self.db = db
         self.llm = PixtralClient()
         self.system_prompt = GENERAL_EMAIL_ASSISTANT_PROMPT
     
@@ -36,11 +40,18 @@ class ReplyGenerator:
         meeting_keywords = ['meeting', 'call', 'zoom', 'teams', 'schedule', 'meet up', 'interview', 'calendar']
         if any(kw in (body or "").lower() for kw in meeting_keywords):
             from agents.executive.scheduler import ExecutiveScheduler
-            # Detect provider (default to gmail if not known)
-            # In a real app, this should be passed in or stored in user profile
-            # For now, we'll try gmail then outlook based on token existence
-            provider = 'gmail' if os.path.exists('.gmail_oauth_token.json') else 'outlook'
-            scheduler = ExecutiveScheduler(provider=provider)
+            
+            # Detect provider from database
+            provider = 'gmail'
+            if self.user_id and self.db:
+                outlook_acc = self.db.query(MailAccount).filter_by(user_id=self.user_id, provider="outlook").first()
+                if outlook_acc:
+                    provider = 'outlook'
+            else:
+                # Fallback to file check if no user_id/db (legacy)
+                provider = 'gmail' if os.path.exists('.gmail_oauth_token.json') else 'outlook'
+                
+            scheduler = ExecutiveScheduler(provider=provider, user_id=self.user_id, db=self.db)
             scheduling_context = "\n[CALENDAR AVAILABILITY (Next 3 Days)]:\n" + scheduler.find_free_slots(days=3)
 
         # Prepare user prompt
@@ -57,15 +68,22 @@ class ReplyGenerator:
         # Tone Mirroring Logic: Fetch SENT emails to learn style
         style_examples_context = ""
         try:
-            provider = 'gmail' if os.path.exists('.gmail_oauth_token.json') else 'outlook'
+            provider = 'gmail'
+            if self.user_id and self.db:
+                outlook_acc = self.db.query(MailAccount).filter_by(user_id=self.user_id, provider="outlook").first()
+                if outlook_acc:
+                    provider = 'outlook'
+            else:
+                provider = 'gmail' if os.path.exists('.gmail_oauth_token.json') else 'outlook'
+
             if provider == 'gmail':
                 from agents.rfq_agent.gmail_api_client import GmailAPIFetcher
-                fetcher = GmailAPIFetcher()
+                fetcher = GmailAPIFetcher(user_id=self.user_id, db=self.db)
                 if fetcher.connect():
                     sent_emails = fetcher.fetch_sent_emails(limit=5)
             else:
                 from agents.rfq_agent.outlook_graph import OutlookGraphFetcher
-                fetcher = OutlookGraphFetcher()
+                fetcher = OutlookGraphFetcher(user_id=self.user_id, db=self.db)
                 if fetcher.connect():
                     sent_emails = fetcher.fetch_sent_emails(limit=5)
             

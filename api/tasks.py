@@ -22,7 +22,7 @@ async def sync_user_writing_style(user_id: int, provider: str):
         emails_to_analyze = []
 
         if provider == 'outlook':
-            fetcher = OutlookGraphFetcher()
+            fetcher = OutlookGraphFetcher(user_id=user_id, db=db)
             if fetcher.connect():
                 # Fetch last 50 sent emails
                 sent_emails = fetcher.fetch_sent_emails(limit=50)
@@ -34,7 +34,7 @@ async def sync_user_writing_style(user_id: int, provider: str):
         
         elif provider == 'gmail':
             from agents.rfq_agent.gmail_api_client import GmailAPIFetcher
-            fetcher = GmailAPIFetcher()
+            fetcher = GmailAPIFetcher(user_id=user_id, db=db)
             if fetcher.connect():
                 # Fetch last 50 sent emails
                 sent_emails = fetcher.fetch_sent_emails(limit=50)

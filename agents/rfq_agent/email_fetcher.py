@@ -17,6 +17,7 @@ from config.settings import (
     EMAIL_FILTER_SUBJECTS, EMAIL_MARK_AS_READ,
     EMAIL_PROVIDERS
 )
+from sqlalchemy.orm import Session
 
 # Import OAuth clients
 try:
@@ -35,8 +36,10 @@ except ImportError:
 class EmailFetcher:
     """Fetch emails from Gmail or Outlook"""
     
-    def __init__(self, provider=None):
+    def __init__(self, provider=None, user_id: int = None, db: Session = None):
         self.provider = provider if provider else EMAIL_PROVIDERS[0]
+        self.user_id = user_id
+        self.db = db
         
         if self.provider not in EMAIL_PROVIDERS:
             available = ', '.join(EMAIL_PROVIDERS)
@@ -52,7 +55,7 @@ class EmailFetcher:
             gmail_oauth_enabled = os.getenv('GMAIL_OAUTH_ENABLED', 'false').lower() == 'true'
             if gmail_oauth_enabled and GMAIL_API_AVAILABLE:
                 try:
-                    self.gmail_api_client = GmailAPIFetcher()
+                    self.gmail_api_client = GmailAPIFetcher(user_id=self.user_id, db=self.db)
                     self.using_gmail_api = True
                 except Exception as e:
                     print(f"Fallback to IMAP: {e}")
@@ -65,7 +68,7 @@ class EmailFetcher:
             outlook_oauth_enabled = os.getenv('OUTLOOK_OAUTH_ENABLED', 'false').lower() == 'true'
             if outlook_oauth_enabled and OUTLOOK_GRAPH_AVAILABLE:
                 try:
-                    self.outlook_graph = OutlookGraphFetcher()
+                    self.outlook_graph = OutlookGraphFetcher(user_id=self.user_id, db=self.db)
                     self.using_graph_api = True
                 except Exception as e:
                     print(f"Fallback to IMAP: {e}")

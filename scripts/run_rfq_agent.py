@@ -91,7 +91,7 @@ def log_progress(db, thread_id, action, details=None):
         print(f"  [!] Failed to log progress: {e}")
         db.rollback()
 
-def process_incoming_email(email_data: Dict):
+def process_incoming_email(email_data: Dict, user_id: int = None):
     """
     Main workflow for General Email Assistant
     """
@@ -116,6 +116,21 @@ def process_incoming_email(email_data: Dict):
     
     db_session = SessionLocal()
     try:
+        # If user_id not provided, try to find it from Email record if it exists
+        if not user_id:
+            email_rec = db_session.query(Email).filter(Email.email_id == email_data['email_id']).first()
+            if email_rec:
+                user_id = email_rec.user_id
+        
+        # Fallback to first user if still not found (legacy/single user)
+        if not user_id:
+            first_user = db_session.query(User).first()
+            if first_user:
+                user_id = first_user.id
+        
+        if not user_id:
+            print("❌ CRITICAL: No User ID found for processing.")
+            return {"status": "ERROR", "reason": "No User ID"}
         # Step 2: Contact & Topic Identification
         print("\nStep 2: Identifying contact...")
         client_matcher = ClientMatcher()
@@ -129,7 +144,8 @@ def process_incoming_email(email_data: Dict):
             contact = client_matcher.find_or_create_client(
                 email_sender=email_data['sender'],
                 email_body=email_data['body'],
-                session=db_session
+                session=db_session,
+                user_id=user_id
             )
         else:
             print(f"  [*] EXISTING CLIENT: {contact.contact_name}")
@@ -141,7 +157,8 @@ def process_incoming_email(email_data: Dict):
         topic = project_matcher.find_matching_project(
             client_id=contact.id,
             project_data=email_data,
-            session=db_session
+            session=db_session,
+            user_id=user_id
         )
         
         is_update = topic is not None
@@ -165,7 +182,8 @@ def process_incoming_email(email_data: Dict):
                 client_id=contact.id,
                 tender_id=thread_id,
                 project_name=email_data['subject'],
-                session=db_session
+                session=db_session,
+                user_id=user_id
             )
         else:
             # Check if this is an update to an incomplete tender
@@ -191,6 +209,7 @@ def process_incoming_email(email_data: Dict):
             print(f"  [+] Creating new thread record for {thread_id}...")
             new_thread = Thread(
                 thread_id=thread_id,
+                user_id=user_id,
                 status='PROCESSING',
                 contact_id=contact.id,
                 topic_id=topic.id,
@@ -212,6 +231,7 @@ def process_incoming_email(email_data: Dict):
                 message_id=email_data.get('message_id'),
                 in_reply_to=email_data.get('in_reply_to'),
                 thread_id=thread_id,
+                user_id=user_id,
                 subject=email_data['subject'],
                 sender=email_data['sender'],
                 body=email_data['body'],
@@ -274,6 +294,7 @@ def process_incoming_email(email_data: Dict):
                     link_name = f"[LINK] {link['provider'].value.title()} Documents"
                     new_link_att = Attachment(
                         thread_id=thread_id,
+                        user_id=user_id,
                         category="00_Cloud_Links",
                         filename=link_name,
                         original_filename=link_name,
@@ -333,6 +354,7 @@ def process_incoming_email(email_data: Dict):
             
             new_att = Attachment(
                 thread_id=thread_id,
+                user_id=user_id,
                 email_id=email_data['email_id'],
                 category=analysis.get('category', 'General'),
                 filename=save_result['versioned_filename'],
@@ -357,7 +379,7 @@ def process_incoming_email(email_data: Dict):
         db_session.commit()
 
         # 1. Fetch User Profile for Style Mirroring
-        user = db_session.query(User).first() # In multi-tenant, fetch by ID
+        user = db_session.query(User).filter(User.id == user_id).first()
         writing_style_guide = user.writing_style_guide if user else ""
         custom_instructions = user.custom_instructions if user else ""
 
@@ -389,7 +411,7 @@ def process_incoming_email(email_data: Dict):
         draft_content = workflow_result.get('draft', {})
         
         provider = email_data.get('provider', 'gmail').lower()
-        draft_mgr = DraftManager()
+        draft_mgr = DraftManager(user_id=user_id, db=db_session)
         draft_result = draft_mgr.create_draft(
 
             provider=provider,
@@ -401,6 +423,7 @@ def process_incoming_email(email_data: Dict):
         if draft_result['success']:
             new_draft = DraftReply(
                 thread_id=thread_id,
+                user_id=user_id,
                 draft_type='REPLY',
                 recipient=email_data['sender'],
                 subject=draft_content.get('draft_subject', email_data['subject']),
@@ -455,6 +478,7 @@ def process_incoming_email(email_data: Dict):
                 if rfi_draft_result['success']:
                     new_rfi_draft = DraftReply(
                         thread_id=thread_id,
+                        user_id=user_id,
                         draft_type='CLARIFICATION',
                         recipient=email_data['sender'],
                         subject=rfi_draft_content.get('subject'),
@@ -578,7 +602,7 @@ def process_incoming_email(email_data: Dict):
                     # Generate a random pleasant color for new tags
                     import secrets
                     colors = ["#6366f1", "#8b5cf6", "#ec4899", "#f43f5e", "#f59e0b", "#10b981", "#06b6d4"]
-                    tag = Tag(name=tag_name, color=secrets.choice(colors))
+                    tag = Tag(name=tag_name, color=secrets.choice(colors), user_id=user_id)
                     db_session.add(tag)
                     db_session.flush() # Get ID
                 

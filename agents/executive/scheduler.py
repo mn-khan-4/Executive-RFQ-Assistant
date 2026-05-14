@@ -8,19 +8,40 @@ from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 import msal
 import requests
+from sqlalchemy.orm import Session
+from database.models import MailAccount
 
 class GoogleCalendarClient:
     """Interface to Google Calendar for Free/Busy lookups"""
-    def __init__(self):
+    def __init__(self, user_id: int = None, db: Session = None):
+        self.user_id = user_id
+        self.db = db
         self.token_file = Path('.gmail_oauth_token.json')
         self.service = None
 
     def connect(self) -> bool:
-        if not self.token_file.exists():
+        token_data = None
+        mail_account = None
+
+        if self.user_id and self.db:
+            mail_account = self.db.query(MailAccount).filter_by(
+                user_id=self.user_id, provider="gmail"
+            ).first()
+            if mail_account:
+                token_data = mail_account.meta_data
+                if isinstance(token_data, str):
+                    token_data = json.loads(token_data)
+
+        if not token_data and self.token_file.exists():
+            try:
+                with open(self.token_file, 'r') as f:
+                    token_data = json.load(f)
+            except: pass
+
+        if not token_data:
             return False
+            
         try:
-            with open(self.token_file, 'r') as f:
-                token_data = json.load(f)
             
             creds = Credentials(
                 token=token_data.get('token'),
@@ -34,8 +55,16 @@ class GoogleCalendarClient:
             if creds.expired and creds.refresh_token:
                 creds.refresh(GoogleRequest())
                 token_data['token'] = creds.token
-                with open(self.token_file, 'w') as f:
-                    json.dump(token_data, f, indent=2)
+                
+                if mail_account:
+                    mail_account.token = creds.token
+                    if isinstance(mail_account.meta_data, dict):
+                        mail_account.meta_data['token'] = creds.token
+                    self.db.commit()
+
+                if self.token_file.exists():
+                    with open(self.token_file, 'w') as f:
+                        json.dump(token_data, f, indent=2)
             
             self.service = build('calendar', 'v3', credentials=creds)
             return True
@@ -122,9 +151,9 @@ class GoogleCalendarClient:
 
 class OutlookCalendarClient:
     """Interface to Microsoft Graph for Calendar lookups"""
-    def __init__(self):
+    def __init__(self, user_id: int = None, db: Session = None):
         from agents.rfq_agent.outlook_graph import OutlookGraphFetcher
-        self.fetcher = OutlookGraphFetcher()
+        self.fetcher = OutlookGraphFetcher(user_id=user_id, db=db)
 
     def connect(self) -> bool:
         return self.fetcher.connect()
@@ -213,9 +242,11 @@ class OutlookCalendarClient:
 
 class ExecutiveScheduler:
     """Orchestrates availability lookups and suggests slots"""
-    def __init__(self, provider: str = 'gmail'):
+    def __init__(self, provider: str = 'gmail', user_id: int = None, db: Session = None):
         self.provider = provider
-        self.client = GoogleCalendarClient() if provider == 'gmail' else OutlookCalendarClient()
+        self.user_id = user_id
+        self.db = db
+        self.client = GoogleCalendarClient(user_id=user_id, db=db) if provider == 'gmail' else OutlookCalendarClient(user_id=user_id, db=db)
 
     def find_free_slots(self, days=3) -> str:
         """Fetch busy events and return a summary for the LLM"""

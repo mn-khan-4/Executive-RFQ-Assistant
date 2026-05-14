@@ -10,12 +10,18 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
 from config.oauth_config import CLIENT_ID, CLIENT_SECRET, TENANT_ID, SCOPES, TOKEN_FILE
+
+# Database imports
+from database.models import MailAccount
+from sqlalchemy.orm import Session
 class OutlookGraphFetcher:
     """Fetch Outlook emails using Microsoft Graph API"""
     
     _session = None
 
-    def __init__(self):
+    def __init__(self, user_id: int = None, db: Session = None):
+        self.user_id = user_id
+        self.db = db
         self.email = os.getenv('OUTLOOK_USER')
         self.token_file = Path('.outlook_oauth_token.json')
         self.base_url = 'https://graph.microsoft.com/v1.0'
@@ -27,15 +33,37 @@ class OutlookGraphFetcher:
     
     def _load_token(self) -> str:
         """Load and refresh OAuth2 access token"""
-        if not TOKEN_FILE.exists():
+        token_data = None
+        mail_account = None
+
+        if self.user_id and self.db:
+            # Load from database
+            mail_account = self.db.query(MailAccount).filter_by(
+                user_id=self.user_id, provider="outlook"
+            ).first()
+            if mail_account:
+                token_data = {
+                    "access_token": mail_account.token,
+                    "refresh_token": mail_account.refresh_token,
+                    "meta_data": mail_account.meta_data
+                }
+        
+        # Fallback to file for legacy/superadmin or if db not provided
+        if not token_data and TOKEN_FILE.exists():
+            try:
+                with open(TOKEN_FILE, 'r') as f:
+                    token_data = json.load(f)
+            except Exception as e:
+                print(f"Error loading legacy token file: {e}")
+
+        if not token_data:
             raise Exception(
                 "No Outlook OAuth token found! "
                 "Please authenticate first via the Settings page."
             )
         
         try:
-            with open(TOKEN_FILE, 'r') as f:
-                token_data = json.load(f)
+            # We already loaded token_data above
             
             # Use MSAL to get a valid token (refreshes if needed)
             authority = f"https://login.microsoftonline.com/{TENANT_ID}"
@@ -72,11 +100,23 @@ class OutlookGraphFetcher:
             
             if result and 'access_token' in result:
                 # Update token file if refreshed
-                if result.get('refresh_token') and result['refresh_token'] != token_data.get('refresh_token'):
+                if result.get('access_token') and result['access_token'] != token_data.get('access_token'):
                     token_data['access_token'] = result['access_token']
-                    token_data['refresh_token'] = result['refresh_token']
-                    with open(TOKEN_FILE, 'w') as f:
-                        json.dump(token_data, f, indent=2)
+                    if result.get('refresh_token'):
+                        token_data['refresh_token'] = result['refresh_token']
+                    
+                    # Save back to DB if we have it
+                    if mail_account:
+                        mail_account.token = result['access_token']
+                        if result.get('refresh_token'):
+                            mail_account.refresh_token = result['refresh_token']
+                        mail_account.meta_data = result
+                        self.db.commit()
+                    
+                    # Also update legacy file if it exists
+                    if TOKEN_FILE.exists():
+                        with open(TOKEN_FILE, 'w') as f:
+                            json.dump(token_data, f, indent=2)
                 
                 return result['access_token']
             
